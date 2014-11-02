@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Loudspeaker array</title>
+  <!-- Suppress browser request for favicon.ico -->
+  <link rel="shortcut icon" href="#">
+</head>
+<style>
+* {
+  box-sizing: border-box;
+  font-family: Arial, Helvetica, sans-serif;
+  color: white;
+}
+html,
+body,
+canvas {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  margin: 0px;
+  overflow: hidden;
+}
+
+#menu {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 120px;
+}
+
+#menu div {
+  position: relative;
+  display: block;
+  margin: 5px auto;
+  text-align: center;
+  text-shadow: 0 0 3px black;
+  width: 100%;
+  padding: 5px 10px;
+  border-radius: 5px;
+  background-color: rgba(124, 105, 229, 1);
+}
+
+#menu input {
+  width: 100%;  
+  text-align: center;
+  border-radius: 5px;
+  height: 20px;
+  margin: 2px auto;
+  color: black;
+}
+#new {
+  margin-top: 30px;
+}
+#new:hover {
+  background-color: rgba(161, 144, 255, 1);
+  cursor: pointer;
+}
+
+#help {
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+  width: 30px;
+  height: 30px;
+  border-radius: 15px;
+  border: 2px solid white;
+  background-color: rgba(124, 105, 229, 1);
+  text-shadow: 0 0 3px black;
+  text-align: center;
+}
+#help #icon {
+  font-size: 22px;
+}
+#help #title {
+  display: none;
+  font-size: 14pt;
+}
+#help ul {
+  text-align: initial;
+  font-size: 12pt;
+  display: none;
+}
+#help:hover {
+  width: 300px;
+  height: initial;
+  border-radius: 5px;
+  right: 0;
+  border: none;
+  padding: 10px;
+}
+#help:hover #icon{
+  display: none;
+}
+#help:hover #title {
+  display: block;
+}
+#help:hover ul {
+  display: block;
+}
+.source {
+  display: block;
+  cursor: pointer;
+  border: 1px solid black;
+  width: 7px;
+  height: 7px;
+  position: absolute;
+  border-radius: 10px;
+  background-color: grey;
+  margin-left: -5px;
+  margin-top: -5px;
+}
+</style>
+<script type="text/javascript">
+document.addEventListener('DOMContentLoaded', function () {
+  "use strict";
+  // localStorage.clear();
+  /* how many times we scale the canvas compared to the screen */
+  var canvas_scale_factor = 8;
+
+  /* cache maths functions */
+  var e = Math.exp;
+  var pi = Math.PI;
+  var cos = Math.cos;
+  var sin = Math.sin;
+  var sqrt = Math.sqrt;
+  var abs = Math.abs;
+  var log = Math.log;
+  var max = Math.max;
+  var min = Math.min;
+  var ceil = Math.ceil;
+  var round = Math.round;
+  var INV_LOG_OF_10 = 1 / log(10.0);
+
+  var recallStateOrDefault = function() {
+    var default_state = {
+      origin: [0,0],
+      scale: 0.01,
+      sources: [],
+      freq: 1000
+    };
+    var strstate = localStorage.getItem('state');
+
+    if (!strstate) {
+      return default_state
+    }
+    try {
+      return JSON.parse(strstate);
+    } catch (e) {
+      return default_state;
+    }
+  };
+  var saveState = function() {
+    localStorage.setItem('state', JSON.stringify(state));
+  };
+  var getPresets = function() {
+    return JSON.parse(localStorage.getItem('presets') || '{}');
+  };
+  var presetExists = function(name) {
+    var presets = getPresets();
+    return name in presets;
+  };
+  var saveAsPreset = function(name, state) {
+    var presets = getPresets();
+    presets[name] = state;
+    localStorage.setItem('presets', JSON.stringify(state));
+  };
+  var recallPreset = function(name) {
+    var presets = getPresets();
+    // FIXME: don't access state directly
+    state = presets[name] || {};
+    saveState();
+  };
+
+  /*
+  Color coded value of x with polynomials.
+  from wolfram interpolating polynomials
+    red {0,0},{0.6,0.67},{1.0,0.77} 
+    green {0,0.1},{0.6,0.77},{1.0,0.1}
+    blue {0,0.9},{0.2, .9},{0.7,0.25},{1.0,0}
+  x should be in [0,1]
+  */
+  var color = function(x) {
+    var x2 = x * x;
+    var red = 1.63667 * x - 0.866667 * x2;
+    var green = 0.1 + 2.79167 * x - 2.79167 * x2;
+    var blue = 0.9 + 0.713095 * x - 4.05357 * x2 + 2.44048 * x2 * x;
+    return [red * 255, green * 255, blue * 255];
+  };
+
+  /* pixel coordinates of sources in the canvas */
+  var _pix_sources = function(sources, scale, origin, canvas_scale_factor) {
+    var psources = [];
+    var i, len = sources.length;
+    for (i = 0; i <len; i++) {
+      var xp = (sources[i].x / scale - origin[0]) / canvas_scale_factor;
+      var yp = (sources[i].z / scale - origin[1]) / canvas_scale_factor;
+      psources[psources.length] = [xp, yp];
+    }
+    return psources;
+  };
+
+  var spl_map = function(ctx, state, width, height) {
+    var i, j, xi, yi, x, y, re, im, inv_d, d, dx, dy, len;
+    var srcs = _pix_sources(state.sources, state.scale, state.origin, canvas_scale_factor);
+    var dscale = +state.scale * canvas_scale_factor;
+    // console.log(sources);
+    // console.log(srcs);
+    var srcs_count = srcs.length;
+    var img = ctx.createImageData(width, height);
+    var data = img.data;
+    // compute the apparent wave number
+    var k = 2 * pi * state.freq / 343.0; // * state.scale * canvas_scale_factor;
+    var kd;
+    var distance_factor = 1 / state.scale;
+
+    for (yi = 0; yi < height; yi++) {
+      for (xi = 0; xi < width; xi++) {
+        // this is 2D.
+        x = xi + 0.5;
+        y = yi + 0.5;
+        re = 0;
+        im = 0;
+        for (i = 0; i < srcs_count; i++) {
+          dx = x - srcs[i][0];
+          dy = y - srcs[i][1];
+          d = dscale * sqrt(dx * dx + dy * dy);
+          kd = k * d;
+          inv_d = 1 / d;
+          re += cos(kd) * inv_d;
+          im += sin(kd) * inv_d;
+        }
+        // pseudo spl: we want 0dB at 1m for one source */
+        var spl = 10.0 * log(re * re + im * im) * INV_LOG_OF_10;
+        var zspl = (21 + max(-21, min(spl, 9))) / (21 + 9);
+        var col = color(zspl);
+
+        var ipx = 4 * (yi * width + xi);
+        data[ipx+0] = col[0];
+        data[ipx+1] = col[1];
+        data[ipx+2] = col[2];
+        data[ipx+3] = 255;
+      }
+    }
+    return img;
+  };
+
+  var draw = function(state) {
+    var ctx = document.getElementById("canvas").getContext("2d");
+    ctx.canvas.width  = Math.round(window.innerWidth / canvas_scale_factor);
+    ctx.canvas.height = Math.round(window.innerHeight / canvas_scale_factor);
+    var image = spl_map(ctx, state, ctx.canvas.width, ctx.canvas.height);
+    ctx.putImageData(image, 0, 0);
+    draw_grid(state.scale, state.origin);
+    draw_spl_scale(ctx)
+    draw_sources(state.scale, state.sources, state.origin);
+  };
+  var draw_spl_scale = function(ctx, min, max, step) {
+    var ctx = document.getElementById("grid").getContext("2d");
+    var i, c, x;
+    ctx.font = '12px Arial';
+    for (i = -21, x = 10 ; i <= 12; i += 3, x += 50) {
+      c = color((21 + i) / (21 + 12));
+      ctx.fillStyle = 'rgb(' + round(c[0]) + ',' + round(c[1]) + ',' + round(c[2]) + ')';
+      ctx.fillRect(x, 10, 50, 20);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(i+'dB', x + 10, 25);
+    }
+  };
+  var draw_grid = function(scale, origin) {
+    var x, y;
+    var ctx = document.getElementById("grid").getContext("2d");
+    ctx.canvas.width  = window.innerWidth;
+    ctx.canvas.height = window.innerHeight;
+    ctx.strokeStyle = '#bbb';
+    ctx.lineWidth = '1px';
+    ctx.beginPath();
+    var h = ctx.canvas.height;
+    var w = ctx.canvas.width;
+    
+    // FIXME: we don't want too much lines: space between lines should >100px and <200px
+    var tick_len = 1;
+    var tick_step = 6;
+    // var grid_space = round(10 / scale); // 10 meter scale
+    var meters_per_100px = 100 * scale;
+    var m10 = log(meters_per_100px) / log(10);
+    var rm10 = round(m10);
+    var m5 = log(meters_per_100px) / log(5);
+    var rm5 = round(m5);
+    var meter_grid_space = (m5 - rm5 < m10 - rm10)? Math.pow(5, rm5) : Math.pow(10, rm10);
+    var grid_space = Math.round(meter_grid_space / scale);
+    // var grid_space = round(10 / scale); // 10 meter scale
+    var x_orig = origin[0];
+    var y_orig = origin[1];
+    var xmin = 0.5 + round(abs(x_orig - grid_space * ceil(x_orig/grid_space)));
+    var ymin = 0.5 + round(abs(y_orig - grid_space * ceil(y_orig/grid_space)));
+    for (x = xmin; x < w; x += grid_space) {
+      for (y = 0.5; y < h; y += tick_step) {
+        ctx.moveTo(x, y); ctx.lineTo(x, y + tick_len);
+      }
+    }
+    for (y = ymin; y < h; y += grid_space) {
+      for (x = 0.5; x < w; x += tick_step) {
+        ctx.moveTo(x, y); ctx.lineTo(x + tick_len, y);
+      }
+    }
+    ctx.stroke();
+    ctx.closePath();
+    ctx.font = '15px Arial';
+    ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#fff';
+    ctx.lineWidth = '2px';
+    ctx.moveTo(20, h - 25);
+    ctx.lineTo(20, h - 20);
+    ctx.lineTo(20 + grid_space, h - 20);
+    ctx.lineTo(20 + grid_space, h - 25);
+    ctx.stroke();
+    ctx.fillText(meter_grid_space+'m', 10 + grid_space / 2, h - 25);
+  };
+
+  var draw_sources = function(scale, sources, origin) {
+    /* remove all sources */
+    var body = document.getElementsByTagName('body')[0];
+    var srcs = document.getElementsByClassName('source');
+    while (srcs.length !== 0) {
+      body.removeChild(srcs[0]);
+      srcs = document.getElementsByClassName('source');
+    }
+    /* now readd them all */
+    var canvas = document.getElementById("canvas").getContext("2d").canvas;
+    var canvas_scale = canvas.width / window.innerWidth;
+    var i, len = sources.length;
+    for (i = 0; i < len; i++) {
+      var src = document.createElement('div');
+      src.setAttribute('data-id', i);
+      src.setAttribute('class', 'source');
+      // source coordinate is in meters
+      var x = sources[i].x / scale - origin[0];
+      var y = sources[i].z / scale - origin[1];
+      // console.log("source", x, y);
+      src.setAttribute('style', 'left:'+x+'px;top:'+y+'px');
+      src.onclick = on_source_click;
+      body.appendChild(src);
+    }
+  };
+
+  var on_source_click = function(ev) {
+    // console.log("remove_src ?", ev, this);
+    if (ev.altKey == true) {
+      // console.log('remove this', this);
+      var body = document.getElementsByTagName('body')[0];
+      body.removeChild(this);
+      var new_sources = [];
+      var index = Number(this.getAttribute('data-id'));
+      // console.log('remove ', index);
+      var i, len = state.sources.length;
+      for (i = 0; i < len; i++) {
+        if (i != index) {
+          new_sources[new_sources.length] = state.sources[i];
+        }
+      }
+      state.sources = new_sources;
+      saveState();
+      draw(state);
+    }
+    ev.bubbles = true;
+    return true;
+  };
+
+  var state = recallStateOrDefault();
+
+  document.getElementById('new').addEventListener('click', function(ev) {
+    state.sources = [];
+    saveState();
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    draw(state);
+  });
+
+  document.addEventListener('mousewheel', function(ev) {
+    var x = ev.pageX;
+    var y = ev.pageY;
+    var factor = (ev.wheelDelta > 0)? 1.05 : 0.95;
+    state.scale *= factor;
+    state.scale = max(0.00036, min(12.2, state.scale));
+    // console.log(state.scale);
+    // move the origin so that zoom is relative to mouse
+    state.origin[0] = (x + state.origin[0]) / factor - x;
+    state.origin[1] = (y + state.origin[1]) / factor - y;
+    saveState()
+    draw(state);
+  });
+
+  var mouse_down_position;
+  var mouse_is_down = false;
+  var mouse_moved = false;
+  var grid = document.getElementById('grid');
+  grid.addEventListener('mousedown', function(ev) {
+    mouse_down_position = [ev.pageX, ev.pageY];
+    mouse_is_down = true;
+    mouse_moved = false;
+  });
+
+  grid.addEventListener('mouseup', function(ev) {
+    mouse_is_down = false;
+    document.body.style.cursor = 'default';
+    if (!mouse_moved) {
+      // this is a click. add a source
+      // store each point position as a meter position,
+      // so that we don't have to update sources position when
+      // the scale or origin changes.
+      var x = state.scale * (ev.pageX + state.origin[0]);
+      var z = state.scale * (ev.pageY + state.origin[1]);
+      state.sources[state.sources.length] = {x: x, y: 0, z: z};
+      saveState();
+      draw(state);
+    }
+  });
+
+  grid.addEventListener('mousemove', function(ev) {
+    if (mouse_is_down) {
+      mouse_moved = true;
+      document.body.style.cursor = 'move';
+      var new_pos = [ev.pageX, ev.pageY];
+      state.origin[0] -= new_pos[0] - mouse_down_position[0];
+      state.origin[1] -= new_pos[1] - mouse_down_position[1];
+      saveState();
+      mouse_down_position = new_pos;
+      draw(state);
+    }
+  });
+
+/*
+  var save_input = document.getElementById('save');
+  save_input.onchange = function() {
+    console.log('save');
+    var name = save_input.value;
+    saveAsPreset(name, state);
+    save_input.value = '';
+  };
+
+  var recall_input = document.getElementById('recall');
+  recall_input.onchange = function() {
+    console.log('recall');
+    var name = recall_input.value;
+    recallPreset(name, state);
+    recall_input.value = '';
+    draw(state);
+  };
+*/
+  var freq_input = document.getElementById('freq');
+  freq_input.value = state.freq;
+  freq_input.onchange = function(ev) {
+    state.freq = Number(freq_input.value);
+    saveState();
+    draw(state);
+  };
+
+  window.onresize = function() {
+    draw(state);
+  };
+  draw(state);
+});
+</script>
+<body>
+<canvas id="canvas"></canvas>
+<canvas id="grid"></canvas>
+<div id="menu">
+  <div>Frequency
+    <input id="freq" type="text" size="8">
+  </div>
+  <div id="new">New</div>
+<!--   <div>Save as
+    <input id="save" placeholder="choose name...">
+  </div>
+  <div>Recall
+    <input id="recall" placeholder="choose name...">
+  </div>
+ -->
+</div>
+<div id="help">
+  <div id="icon">?</div>
+  <div id="title">Help</div>
+  <ul>
+    <li>Add an omnidirectionnal source with a click</li>
+    <li>Alt+click to delete a source</li>
+    <li>Zoom with the mouse wheel</li>
+    <li>Drag the map</li>
+  </ul>
+</div>
+
+</body>
+</html>
