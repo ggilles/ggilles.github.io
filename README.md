@@ -1,2 +1,2 @@
-This is Gilles Gregoire's random pages.
+This is Gilles' random pages.
 
